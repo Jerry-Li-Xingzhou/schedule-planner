@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="日程规划">
+    <meta name="theme-color" content="#F2F2F7">
+    <title>日程规划</title>
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/png" href="/icons/icon-192.png">
+    <link rel="apple-touch-icon" href="/icons/icon-180.png">
+
+    <!-- FullCalendar -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
+    <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+
+    <!-- App CSS -->
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body x-data="app" @keydown.escape="closeEventModal(); closeCategoryModal(); closeProjectModal(); closeTaskModal()">
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<header class="app-header">
+    <div class="header-left">
+        <h1>📅 日程规划</h1>
+    </div>
+
+    <div class="header-center">
+        <div class="segmented-control">
+            <button :class="{ active: view === 'calendar' }" @click="view = 'calendar'">
+                📆 日历
+            </button>
+            <button :class="{ active: view === 'gantt' }" @click="view = 'gantt'; refreshProjects()">
+                ✅ 任务
+            </button>
+            <button :class="{ active: view === 'list' }" @click="view = 'list'">
+                📋 列表
+            </button>
+            <button :class="{ active: view === 'summary' }" @click="view = 'summary'; refreshSummary()">
+                📝 总结
+            </button>
+        </div>
+    </div>
+
+    <div class="header-right">
+        <button class="btn btn-primary" @click="openCreateModal()">＋ 新建</button>
+        <div class="dropdown">
+            <button class="btn-icon" @click="showMenu = !showMenu" @click.away="showMenu = false">⋯</button>
+            <div class="dropdown-menu" x-show="showMenu">
+                <a href="#" @click.prevent="showMenu = false; openCategoryModal()">📂 管理分类</a>
+                <a href="#" @click.prevent="showMenu = false; exportData()">📥 导出数据</a>
+                <a href="#" @click.prevent="showMenu = false; importData()">📤 导入数据</a>
+                <a href="#" @click.prevent="triggerIconUpload()">🖼️ 更换头像</a>
+            </div>
+        </div>
+    </div>
+</header>
+
+<!-- ═══════════════ MAIN LAYOUT ═══════════════ -->
+<div class="app-layout">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+
+        <!-- Category Filter -->
+        <section class="sidebar-section">
+            <h4>📂 分类</h4>
+            <div class="cat-filter-list">
+                <button class="cat-filter-item"
+                        :class="{ active: filterCategory === null }"
+                        @click="filterCategory = null; applyFilters()">
+                    <span class="cat-dot" style="background:var(--gray);"></span>
+                    全部
+                </button>
+                <template x-for="c in categories" :key="c.id">
+                    <button class="cat-filter-item"
+                            :class="{ active: filterCategory === c.id }"
+                            @click="filterCategory = filterCategory === c.id ? null : c.id">
+                        <span class="cat-dot" :style="'background:' + c.color"></span>
+                        <span x-text="c.name"></span>
+                    </button>
+                </template>
+            </div>
+            <button class="cat-add-btn" @click="openCategoryModal()">
+                ＋ 新建分类
+            </button>
+        </section>
+
+        <!-- Status Filter -->
+        <section class="sidebar-section">
+            <h4>📌 状态</h4>
+            <select @change="filterStatus = $event.target.value || null; applyFilters()">
+                <option value="">全部状态</option>
+                <option value="todo">待办</option>
+                <option value="in_progress">进行中</option>
+                <option value="done">已完成</option>
+                <option value="cancelled">已取消</option>
+            </select>
+        </section>
+
+        <!-- Priority Filter -->
+        <section class="sidebar-section">
+            <h4>🚩 优先级</h4>
+            <select @change="filterPriority = $event.target.value !== '' ? parseInt($event.target.value) : null; applyFilters()">
+                <option value="">全部优先级</option>
+                <option value="3">🔴 高</option>
+                <option value="2">🟡 中</option>
+                <option value="1">🟢 低</option>
+            </select>
+        </section>
+
+        <!-- Upcoming -->
+        <section class="sidebar-section">
+            <h4>⏰ 近期日程</h4>
+            <div class="upcoming-list">
+                <template x-for="ev in upcomingEvents" :key="ev.id">
+                    <div class="upcoming-item" @click="openEditModal(ev)"
+                         :style="'border-left: 3px solid ' + (ev.category?.color || 'var(--blue)')">
+                        <div class="upcoming-title" x-text="ev.title"></div>
+                        <div class="upcoming-time" x-text="formatDate(ev.start_time)"></div>
+                    </div>
+                </template>
+                <div class="empty-state" x-show="upcomingEvents.length === 0">暂无近期日程</div>
+            </div>
+        </section>
+
+        <!-- Tags -->
+        <section class="sidebar-section">
+            <h4>🏷️ 标签</h4>
+            <div class="tag-cloud">
+                <template x-for="t in tags" :key="t.id">
+                    <span class="tag-badge" @click="deleteTag(t.id)">#<span x-text="t.name"></span></span>
+                </template>
+                <button class="tag-add" @click="
+                    const n = prompt('新标签名称:');
+                    if (n && n.trim()) createTag(n.trim());
+                ">＋</button>
+            </div>
+        </section>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+
+        <div class="loading-state" x-show="loading">加载中…</div>
+
+        <!-- Calendar View -->
+        <div x-show="!loading && view === 'calendar'">
+            <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px;">
+                <span x-show="calendarViewType === 'timeGridWeek' || calendarViewType === 'timeGridDay'"
+                      style="display:flex;gap:4px;align-items:center;">
+                    <button class="btn btn-secondary" @click="toggleWeather()"
+                            :style="showWeather ? 'background:rgba(0,122,255,0.1);color:#007AFF;border-color:#007AFF;' : ''"
+                            style="font-size:12px;padding:4px 12px;">
+                        🌤️ 天气
+                    </button>
+                    <span x-show="showWeather" style="display:flex;gap:4px;align-items:center;">
+                        <span style="font-size:11px;color:var(--text-secondary);" x-text="weatherCity || '北京'"></span>
+                        <span style="position:relative;">
+                            <input type="text" placeholder="搜索城市..."
+                                   @input="suggestCities($event.target.value)"
+                                   @keydown.enter="changeCity($event.target.value); $event.target.value=''"
+                                   @focus="suggestCities($event.target.value)"
+                                   @click.away="showCitySuggestions = false"
+                                   style="font-size:11px;padding:3px 8px;border-radius:8px;border:0.5px solid var(--separator);width:80px;">
+                            <div x-show="showCitySuggestions && citySuggestions.length > 0"
+                                 style="position:absolute;top:100%;left:0;z-index:300;background:var(--bg-secondary);border:0.5px solid var(--separator);border-radius:8px;box-shadow:var(--shadow-lg);min-width:160px;max-height:180px;overflow-y:auto;margin-top:2px;">
+                                <template x-for="c in citySuggestions" :key="c.lat + ',' + c.lon">
+                                    <div @click="selectCity(c)"
+                                         style="padding:6px 12px;cursor:pointer;font-size:12px;white-space:nowrap;display:flex;align-items:center;gap:6px;"
+                                         @mouseover="$el.style.background='var(--bg-tertiary)'"
+                                         @mouseout="$el.style.background=''">
+                                        <span style="font-weight:600;" x-text="c.name"></span>
+                                        <span x-show="c.region" style="color:var(--text-tertiary);font-size:11px;" x-text="c.region"></span>
+                                    </div>
+                                </template>
+                            </div>
+                        </span>
+                        <span style="font-size:10px;color:var(--text-tertiary);" x-show="weatherTime" x-text="'更新于 ' + weatherTime"></span>
+                        <button class="btn-icon" @click="refreshWeather()" style="font-size:12px;" title="刷新天气">🔄</button>
+                    </span>
+                </span>
+                <button class="btn btn-secondary" @click="toggleLunar()"
+                        x-show="calendarViewType === 'dayGridMonth'"
+                        :style="showLunar ? 'background:rgba(255,59,48,0.1);color:#FF3B30;border-color:#FF3B30;' : ''"
+                        style="font-size:12px;padding:4px 12px;">
+                    🌙 农历
+                </button>
+            </div>
+            <div id="calendar-view"></div>
+        </div>
+
+        <!-- Task View -->
+        <div x-show="!loading && view === 'gantt'" class="task-view">
+            <!-- Project sidebar + task area -->
+            <div style="display:flex;gap:16px;height:100%;">
+                <!-- Project list -->
+                <div class="project-sidebar">
+                    <h4 style="margin:0 0 10px 0;font-weight:600;font-size:13px;color:var(--text-secondary);">📁 项目</h4>
+                    <template x-for="p in projects" :key="p.id">
+                        <div class="project-item"
+                             :class="{ active: selectedProject === p.id }"
+                             @click="selectProject(p.id)"
+                             @dblclick="editProject(p)"
+                             :style="'border-left: 3px solid ' + (selectedProject === p.id ? p.color : 'transparent')">
+                            <span x-text="p.icon"></span>
+                            <span style="flex:1;" x-text="p.name"></span>
+                            <span style="font-size:11px;color:var(--text-tertiary);" x-text="p.done_count + '/' + p.task_count"></span>
+                        </div>
+                    </template>
+                    <button class="cat-add-btn" @click="openProjectCreate()">＋ 新建项目</button>
+                </div>
+
+                <!-- Task tree -->
+                <div style="flex:1;min-width:0;">
+                    <!-- Status filter tabs -->
+                    <div x-show="selectedProjectObj" style="display:flex;gap:4px;margin-bottom:10px;">
+                        <button class="chip" :class="{ active: taskStatusFilter === null }" @click="taskStatusFilter = null">全部</button>
+                        <button class="chip" :class="{ active: taskStatusFilter === 'todo' }" @click="taskStatusFilter = 'todo'">待办</button>
+                        <button class="chip" :class="{ active: taskStatusFilter === 'in_progress' }" @click="taskStatusFilter = 'in_progress'">进行中</button>
+                        <button class="chip" :class="{ active: taskStatusFilter === 'done' }" @click="taskStatusFilter = 'done'">已完成</button>
+                    </div>
+
+                    <!-- Project header -->
+                    <template x-if="selectedProjectObj">
+                        <div class="content-card" style="margin-bottom:12px;">
+                            <div class="flex-between">
+                                <div>
+                                    <h3 style="margin:0;" x-text="selectedProjectObj.icon + ' ' + selectedProjectObj.name"></h3>
+                                    <span class="text-secondary" style="font-size:13px;" x-text="selectedProjectObj.done_count + '/' + selectedProjectObj.task_count + ' 已完成'"></span>
+                                </div>
+                                <div style="display:flex;gap:6px;">
+                                    <button class="btn btn-secondary" @click="addPhase()" style="font-size:12px;padding:5px 10px;">＋ 阶段</button>
+                                    <button class="btn btn-secondary" @click="deleteProject(selectedProject)" style="font-size:12px;padding:5px 10px;">删除项目</button>
+                                </div>
+                            </div>
+                            <!-- Progress -->
+                            <div class="progress-bar" style="margin-top:10px;" x-show="selectedProjectObj.task_count > 0">
+                                <div class="progress-fill" :style="'width:' + (selectedProjectObj.task_count > 0 ? Math.round(selectedProjectObj.done_count / selectedProjectObj.task_count * 100) : 0) + '%'"></div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- Phases & Tasks -->
+                    <template x-if="!selectedProjectObj">
+                        <div class="content-card empty-state">👈 选择或创建一个项目</div>
+                    </template>
+
+                    <template x-if="selectedProjectObj && taskTree.length === 0">
+                        <div class="content-card empty-state">还没有任务，点击「＋ 阶段」开始分解目标</div>
+                    </template>
+
+                    <template x-for="phase in filteredTaskTree" :key="phase.id">
+                        <div class="task-phase content-card" style="margin-bottom:10px;">
+                            <!-- Phase header -->
+                            <div class="flex-between" style="margin-bottom:8px;">
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <span @click="togglePhase(phase.id)" style="cursor:pointer;font-size:12px;" x-text="collapsedPhases[phase.id] ? '▶' : '▼'"></span>
+                                    <span :style="'color:' + statusColor(phase.status)">●</span>
+                                    <strong x-text="phase.title" style="cursor:pointer;" @click="editTask(phase)"></strong>
+                                    <span class="text-tertiary" style="font-size:11px;" x-text="phaseDoneCount(phase) + '/' + (phase.children?.length || 0)"></span>
+                                </div>
+                                <div style="display:flex;gap:4px;">
+                                    <button class="btn btn-secondary" @click="addSubtask(phase.id)" style="font-size:11px;padding:3px 8px;">＋ 子任务</button>
+                                    <button class="btn-icon" @click="deleteTask(phase.id)" style="font-size:14px;">🗑</button>
+                                </div>
+                            </div>
+
+                            <!-- Subtasks -->
+                            <div x-show="!collapsedPhases[phase.id]">
+                                <template x-for="task in (phase.children || [])" :key="task.id">
+                                    <div class="task-item" :class="{ done: task.status === 'done' }"
+                                         :style="'border-left: 3px solid ' + (getCategory(task.category_id)?.color || priorityColor(task.priority)) + ';' + (task.priority >= 3 ? 'background:rgba(255,59,48,0.04);' : '')">
+                                        <input type="checkbox"
+                                               :checked="task.status === 'done'"
+                                               @change="toggleTaskStatus(task, $event.target.checked)"
+                                               style="accent-color:var(--green);width:18px;height:18px;cursor:pointer;flex-shrink:0;">
+                                        <span @click="editTask(task)" style="flex:1;cursor:pointer;"
+                                              :style="task.status === 'done' ? 'text-decoration:line-through;opacity:0.6;' : ''">
+                                            <span x-text="task.title"></span>
+                                            <span style="font-size:10px;opacity:0.6;margin-left:4px;"
+                                                  x-text="taskTypeIcon(task)"></span>
+                                            <span x-show="task.is_recurring && task.due_date && task._end_date"
+                                                  style="font-size:10px;color:var(--text-tertiary);margin-left:4px;"
+                                                  x-text="' 📅' + (task.due_date||'').slice(0,10) + '→' + (task._end_date||'').slice(0,10)"></span>
+                                        </span>
+                                        <span class="text-tertiary" style="font-size:11px;white-space:nowrap;"
+                                              x-show="task.due_date" x-text="formatDateOnly(task.due_date)"></span>
+                                        <span :style="'color:' + priorityColor(task.priority)" style="font-size:11px;"
+                                              x-text="priorityIcon(task.priority)"></span>
+                                        <button class="btn-icon" @click="deleteTask(task.id)" style="font-size:12px;">🗑</button>
+                                    </div>
+                                </template>
+                                <div x-show="!(phase.children && phase.children.length > 0)" class="text-tertiary" style="font-size:12px;padding:6px 0 6px 28px;">
+                                    (空阶段 — 点击「＋ 子任务」添加)
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary View -->
+        <div x-show="!loading && view === 'summary'" class="summary-view">
+            <!-- Stats row -->
+            <div class="summary-stats">
+                <div class="stat-card">
+                    <div class="stat-value" x-text="summary.total"></div>
+                    <div class="stat-label">今日日程</div>
+                </div>
+                <div class="stat-card accent-green">
+                    <div class="stat-value" x-text="summary.done"></div>
+                    <div class="stat-label">已完成</div>
+                </div>
+                <div class="stat-card accent-orange">
+                    <div class="stat-value" x-text="summary.in_progress + summary.todo"></div>
+                    <div class="stat-label">待处理</div>
+                </div>
+                <div class="stat-card accent-blue">
+                    <div class="stat-value" x-text="summary.completion_rate + '%'"></div>
+                    <div class="stat-label">完成率</div>
+                </div>
+            </div>
+
+            <!-- Progress bar -->
+            <div class="content-card" style="margin-bottom:16px;">
+                <div class="flex-between mb-8">
+                    <span style="font-weight:600;">📊 今日进度</span>
+                    <span class="text-secondary" style="font-size:14px;" x-text="summary.done + '/' + summary.total"></span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" :style="'width:' + summary.completion_rate + '%'"></div>
+                </div>
+                <div class="progress-legend">
+                    <span>🟢 完成 <small x-text="summary.done"></small></span>
+                    <span>🟡 进行中 <small x-text="summary.in_progress"></small></span>
+                    <span>⚪ 待办 <small x-text="summary.todo"></small></span>
+                </div>
+            </div>
+
+            <!-- Today's timeline -->
+            <div class="content-card" style="margin-bottom:16px;">
+                <h4 style="margin:0 0 12px 0;font-weight:600;">⏰ 今日时间线</h4>
+                <template x-if="summary.events && summary.events.length > 0">
+                    <div class="timeline">
+                        <template x-for="ev in summary.events" :key="ev.id">
+                            <div class="timeline-item" @click="openEditModal(ev)">
+                                <div class="timeline-dot" :style="'background:' + (ev.category?.color || 'var(--blue)')"></div>
+                                <div class="timeline-content">
+                                    <div style="display:flex;align-items:center;gap:8px;">
+                                        <span :class="{
+                                            'text-green': ev.status === 'done',
+                                            'text-orange': ev.status === 'in_progress',
+                                        }">●</span>
+                                        <strong x-text="ev.title" style="font-size:14px;"></strong>
+                                        <span class="text-secondary" style="font-size:12px;" x-text="ev.all_day ? '全天' : formatDate(ev.start_time) + ' - ' + formatDate(ev.end_time)"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+                <div class="empty-state" x-show="!summary.events || summary.events.length === 0">
+                    🎉 今天没有日程，享受自由的一天！
+                </div>
+            </div>
+
+            <!-- Daily Notes -->
+            <div class="content-card" style="margin-bottom:16px;">
+                <h4 style="margin:0 0 4px 0;font-weight:600;">📝 今日随笔</h4>
+                <p style="margin:0 0 12px 0;font-size:14px;color:var(--text-secondary);" x-text="todayDateStr"></p>
+
+                <!-- Today's saved notes -->
+                <template x-for="n in summary.notes" :key="n.id">
+                    <div style="padding:8px 0;border-bottom:0.5px solid var(--separator);display:flex;align-items:flex-start;gap:8px;">
+                        <span x-show="n.mood" x-text="n.mood" style="font-size:18px;"></span>
+                        <span style="flex:1;font-size:14px;white-space:pre-wrap;" x-text="n.content"></span>
+                        <span class="text-tertiary" style="font-size:10px;white-space:nowrap;" x-text="n.created_at ? n.created_at.slice(11,16) : ''"></span>
+                        <button class="btn-icon" @click="deleteNote(n.id)" style="font-size:12px;">🗑️</button>
+                    </div>
+                </template>
+
+                <!-- New note input -->
+                <div style="margin-top:12px;">
+                    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+                        <span style="font-size:13px;color:var(--text-secondary);">心情：</span>
+                        <template x-for="m in ['😄','😊','😐','😔','😤','❤️','🔥','💪']" :key="m">
+                            <span class="mood-emoji" :class="{ active: currentMood === m }"
+                                  @click="currentMood = m" x-text="m"></span>
+                        </template>
+                    </div>
+                    <textarea class="form-textarea" x-model="noteContent" rows="3"
+                              placeholder="写点今天的事、想法、心得..."></textarea>
+                    <div class="flex-between mt-12">
+                        <span class="text-tertiary" style="font-size:12px;" x-text="noteSavedTime ? '已保存 ' + noteSavedTime : ''"></span>
+                        <button class="btn btn-primary" @click="saveNote()" style="font-size:13px;padding:6px 16px;">💾 保存</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Past Notes Collection -->
+            <div class="content-card">
+                <h4 style="margin:0 0 12px 0;font-weight:600;">📚 随笔集合</h4>
+                <div x-show="pastNotes.length === 0" class="empty-state">还没有写过随笔</div>
+                <template x-for="n in pastNotes" :key="n.id">
+                    <details class="note-entry">
+                        <summary>
+                            <span class="note-date" x-text="formatNoteDate(n.date)"></span>
+                            <span x-show="n.mood" x-text="n.mood" style="margin-left:8px;"></span>
+                            <span class="note-preview text-tertiary" x-text="n.content ? n.content.slice(0, 60) + (n.content.length > 60 ? '...' : '') : '(空)'"></span>
+                            <button class="btn-icon" @click.stop="deleteNote(n.id)" style="font-size:12px;margin-left:auto;" title="删除">🗑️</button>
+                        </summary>
+                        <div x-show="editingPastNoteId !== n.id" class="note-body" x-text="n.content || '(无内容)'"></div>
+                        <div x-show="editingPastNoteId === n.id" style="padding:8px 0;">
+                            <textarea class="form-textarea" x-model="editPastNoteContent" rows="3"></textarea>
+                            <div style="display:flex;gap:6px;margin-top:8px;">
+                                <button class="btn btn-primary" @click="saveEditPastNote(n)" style="font-size:12px;padding:4px 10px;">保存</button>
+                                <button class="btn btn-secondary" @click="editingPastNoteId = null" style="font-size:12px;padding:4px 10px;">取消</button>
+                            </div>
+                        </div>
+                        <div style="padding:4px 0;">
+                            <button class="btn btn-secondary" @click="startEditPastNote(n)" x-show="editingPastNoteId !== n.id" style="font-size:11px;padding:3px 8px;">✏️ 编辑</button>
+                        </div>
+                    </details>
+                </template>
+            </div>
+        </div>
+
+        <!-- List View -->
+        <div x-show="!loading && view === 'list'" class="list-view">
+            <div x-show="filterDate" style="padding:12px 16px;background:rgba(0,122,255,0.06);border-bottom:0.5px solid var(--separator);display:flex;align-items:center;justify-content:space-between;">
+                <span style="font-size:13px;">📅 筛选日期：<strong x-text="filterDate"></strong></span>
+                <button class="btn btn-secondary" @click="filterDate = null" style="font-size:12px;padding:3px 10px;">清除</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>状态</th>
+                        <th>标题</th>
+                        <th>分类</th>
+                        <th>优先级</th>
+                        <th>时间</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="ev in filteredEvents" :key="ev.id">
+                        <tr>
+                            <td data-label="状态">
+                                <select :value="ev.status" @change="updateEventStatus(ev.id, $event.target.value)">
+                                    <option value="todo">待办</option>
+                                    <option value="in_progress">进行中</option>
+                                    <option value="done">已完成</option>
+                                    <option value="cancelled">已取消</option>
+                                </select>
+                            </td>
+                            <td data-label="标题">
+                                <a href="#" @click.prevent="openEditModal(ev)" x-text="ev.title"></a>
+                            </td>
+                            <td data-label="分类">
+                                <span :style="'color:' + (ev.category?.color || 'var(--gray)')" x-text="getCategoryName(ev.category_id)"></span>
+                            </td>
+                            <td data-label="优先级">
+                                <span :style="'color:' + priorityColor(ev.priority)" x-text="priorityLabel(ev.priority)"></span>
+                            </td>
+                            <td data-label="时间" class="text-secondary" x-text="formatDate(ev.start_time)"></td>
+                            <td>
+                                <button class="btn btn-secondary" @click="openEditModal(ev)" style="font-size:12px;padding:4px 10px;">编辑</button>
+                            </td>
+                        </tr>
+                    </template>
+                    <tr x-show="filteredEvents.length === 0">
+                        <td colspan="6" class="empty-state">暂无匹配的日程</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </main>
+</div>
+
+<!-- ═══════════════ EVENT SHEET ═══════════════ -->
+<div class="sheet-overlay" x-show="showEventModal">
+    <div class="sheet-backdrop" @click="closeEventModal()"></div>
+    <div class="sheet-content" @click.stop="">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+            <h3 x-text="editingEvent ? '编辑日程' : '新建日程'"></h3>
+            <button class="btn-icon" @click="closeEventModal()">✕</button>
+        </div>
+        <div class="sheet-body">
+
+            <div class="form-group">
+                <label class="form-label">标题 *</label>
+                <input class="form-input" type="text" x-model="eventForm.title" placeholder="日程标题">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">描述</label>
+                <textarea class="form-textarea" x-model="eventForm.description" rows="2" placeholder="可选描述"></textarea>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">地点</label>
+                <input class="form-input" type="text" x-model="eventForm.location" placeholder="可选地点">
+            </div>
+
+            <div class="form-group">
+                <label class="form-checkbox">
+                    <input type="checkbox" x-model="eventForm.all_day" @change="handleAllDayToggle()">
+                    全天事件
+                </label>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">开始</label>
+                    <input class="form-input" :type="eventForm.all_day ? 'date' : 'datetime-local'" x-model="eventForm.start_time">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">结束</label>
+                    <input class="form-input" :type="eventForm.all_day ? 'date' : 'datetime-local'" x-model="eventForm.end_time">
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">优先级</label>
+                    <select class="form-select" x-model="eventForm.priority">
+                        <option value="0">无</option>
+                        <option value="1">🟢 低</option>
+                        <option value="2">🟡 中</option>
+                        <option value="3">🔴 高</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">状态</label>
+                    <select class="form-select" x-model="eventForm.status">
+                        <option value="todo">待办</option>
+                        <option value="in_progress">进行中</option>
+                        <option value="done">已完成</option>
+                        <option value="cancelled">已取消</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">分类</label>
+                <div style="display:flex;gap:6px;">
+                    <select class="form-select" x-model="eventForm.category_id" style="flex:1;">
+                        <option :value="null">无分类</option>
+                        <template x-for="c in categories" :key="c.id">
+                            <option :value="c.id" x-text="c.icon + ' ' + c.name"></option>
+                        </template>
+                    </select>
+                    <button type="button" class="btn btn-secondary" @click="showQuickCat = !showQuickCat" style="flex-shrink:0;">＋</button>
+                </div>
+                <div x-show="showQuickCat" class="cat-inline-add" @keydown.escape="showQuickCat = false">
+                    <input class="form-input" type="text" x-model="quickCat.icon" placeholder="📂" style="width:50px;text-align:center;">
+                    <input class="form-input" type="text" x-model="quickCat.name" placeholder="分类名" style="flex:1;">
+                    <input type="color" x-model="quickCat.color">
+                    <button class="btn btn-primary" @click="quickAddCategory()" :disabled="!quickCat.name" style="flex-shrink:0;font-size:13px;padding:7px 12px;">创建</button>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">标签</label>
+                <div class="chip-group">
+                    <template x-for="t in tags" :key="t.id">
+                        <span class="chip" :class="{ active: eventForm.tag_ids.includes(t.id) }"
+                              @click="toggleTag(t.id)" x-text="'#' + t.name"></span>
+                    </template>
+                    <span class="text-tertiary" x-show="tags.length === 0" style="font-size:13px;">暂无标签</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">提醒</label>
+                <div class="chip-group">
+                    <span class="chip" :class="{ active: eventForm.reminder_minutes.includes(5) }" @click="toggleReminder(5)">5 分钟</span>
+                    <span class="chip" :class="{ active: eventForm.reminder_minutes.includes(15) }" @click="toggleReminder(15)">15 分钟</span>
+                    <span class="chip" :class="{ active: eventForm.reminder_minutes.includes(30) }" @click="toggleReminder(30)">30 分钟</span>
+                    <span class="chip" :class="{ active: eventForm.reminder_minutes.includes(60) }" @click="toggleReminder(60)">1 小时</span>
+                    <span class="chip" :class="{ active: eventForm.reminder_minutes.includes(1440) }" @click="toggleReminder(1440)">1 天</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="sheet-footer">
+            <button class="btn btn-danger" x-show="editingEvent" @click="deleteEvent()">删除</button>
+            <button class="btn btn-secondary" @click="closeEventModal()">取消</button>
+            <button class="btn btn-primary" @click="saveEvent()" :disabled="!eventForm.title">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ CATEGORY SHEET ═══════════════ -->
+<div class="sheet-overlay" x-show="showCategoryModal">
+    <div class="sheet-backdrop" @click="closeCategoryModal()"></div>
+    <div class="sheet-content" style="max-width:440px;" @click.stop="">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+            <h3>管理分类</h3>
+            <button class="btn-icon" @click="closeCategoryModal()">✕</button>
+        </div>
+        <div class="sheet-body">
+
+            <div class="cat-inline-add" style="border-top:none;margin-top:0;">
+                <input class="form-input" type="text" x-model="catForm.icon" placeholder="📂" style="width:50px;text-align:center;">
+                <input class="form-input" type="text" x-model="catForm.name" placeholder="分类名称" style="flex:1;">
+                <input type="color" x-model="catForm.color">
+                <button class="btn btn-primary" @click="saveCategory()" :disabled="!catForm.name" style="font-size:13px;padding:7px 12px;">添加</button>
+            </div>
+
+            <div class="cat-list">
+                <template x-for="c in categories" :key="c.id">
+                    <div class="cat-item">
+                        <div class="cat-item-left">
+                            <span class="cat-dot" :style="'background:' + c.color" style="width:14px;height:14px;flex-shrink:0;"></span>
+                            <span x-show="editingCatId !== c.id" x-text="c.icon + ' ' + c.name" style="flex:1;"></span>
+                            <input x-show="editingCatId === c.id" type="text" x-model="editCatName" style="flex:1;font-size:14px;padding:4px 8px;border-radius:6px;border:0.5px solid var(--separator);"
+                                   @keydown.enter="saveEditCat(c)" @keydown.escape="editingCatId = null">
+                        </div>
+                        <div style="display:flex;gap:4px;">
+                            <button class="btn-icon" @click="startEditCat(c)" style="font-size:13px;" title="编辑">✏️</button>
+                            <button class="btn-icon" @click="deleteCategory(c.id)" style="font-size:13px;" title="删除">🗑️</button>
+                        </div>
+                    </div>
+                </template>
+                <div class="empty-state" x-show="categories.length === 0">暂无分类</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ PROJECT SHEET ═══════════════ -->
+<div class="sheet-overlay" x-show="showProjectModal">
+    <div class="sheet-backdrop" @click="closeProjectModal()"></div>
+    <div class="sheet-content" style="max-width:400px;" @click.stop="">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+            <h3 x-text="editingProjectId ? '编辑项目' : '新建项目'"></h3>
+            <button class="btn-icon" @click="closeProjectModal()">✕</button>
+        </div>
+        <div class="sheet-body">
+            <div class="form-group"><label class="form-label">图标</label><input class="form-input" type="text" x-model="projectForm.icon" placeholder="📁" style="width:60px;text-align:center;"></div>
+            <div class="form-group"><label class="form-label">名称 *</label><input class="form-input" type="text" x-model="projectForm.name" placeholder="项目名称"></div>
+            <div class="form-group"><label class="form-label">描述</label><textarea class="form-textarea" x-model="projectForm.description" rows="2" placeholder="可选"></textarea></div>
+            <div class="form-group"><label class="form-label">颜色</label><input type="color" x-model="projectForm.color"></div>
+        </div>
+        <div class="sheet-footer">
+            <button class="btn btn-secondary" @click="closeProjectModal()">取消</button>
+            <button class="btn btn-primary" @click="saveProject()" :disabled="!projectForm.name">创建项目</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ TASK SHEET ═══════════════ -->
+<div class="sheet-overlay" x-show="showTaskModal">
+    <div class="sheet-backdrop" @click="closeTaskModal()"></div>
+    <div class="sheet-content" style="max-width:440px;" @click.stop="">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+            <h3 x-text="editingTask ? '编辑任务' : (taskForm.parent_id ? '新建子任务' : '新建阶段')"></h3>
+            <button class="btn-icon" @click="closeTaskModal()">✕</button>
+        </div>
+        <div class="sheet-body">
+            <div class="form-group"><label class="form-label">标题 *</label><input class="form-input" type="text" x-model="taskForm.title" placeholder="任务标题"></div>
+            <div class="form-group">
+                <label class="form-label">类型</label>
+                <div class="chip-group">
+                    <span class="chip" :class="{ active: taskForm.task_type === 'todo' }" @click="taskForm.task_type = 'todo'">☐ 待办</span>
+                    <span class="chip" :class="{ active: taskForm.task_type === 'habit' }" @click="taskForm.task_type = 'habit'">🔄 习惯</span>
+                    <span class="chip" :class="{ active: taskForm.task_type === 'goal' }" @click="taskForm.task_type = 'goal'">🎯 目标</span>
+                    <span class="chip" :class="{ active: taskForm.task_type === 'memo' }" @click="taskForm.task_type = 'memo'">📝 备忘</span>
+                </div>
+            </div>
+            <div class="form-group"><label class="form-label">备注</label><textarea class="form-textarea" x-model="taskForm.note" rows="2" placeholder="可选备注"></textarea></div>
+            <div class="form-row">
+                <div class="form-group"><label class="form-label">状态</label><select class="form-select" x-model="taskForm.status"><option value="todo">待办</option><option value="in_progress">进行中</option><option value="done">已完成</option></select></div>
+                <div class="form-group"><label class="form-label">优先级</label><select class="form-select" x-model="taskForm.priority"><option value="0">无</option><option value="1">🟢 低</option><option value="2">🟡 中</option><option value="3">🔴 高</option></select></div>
+            </div>
+            <div class="form-group"><label class="form-label">分类</label>
+                <select class="form-select" x-model="taskForm.category_id">
+                    <option :value="null">无分类</option>
+                    <template x-for="c in categories" :key="c.id">
+                        <option :value="c.id" x-text="c.icon + ' ' + c.name"></option>
+                    </template>
+                </select>
+            </div>
+            <div class="form-group" x-show="taskForm.is_recurring || taskForm.recurrence"><label class="form-label">开始日期（默认今天）</label><input class="form-input" type="date" x-model="taskForm.start_date"></div>
+            <div class="form-group"><label class="form-label">截止日期</label><input class="form-input" type="date" x-model="taskForm.due_date"></div>
+            <div class="form-group">
+                <label class="form-label">重复</label>
+                <select class="form-select" x-model="recurrenceType" @change="onRecurrenceChange()">
+                    <option value="">不重复</option>
+                    <option value="daily">🔄 每天</option>
+                    <option value="weekdays">📅 每个工作日</option>
+                    <option value="weekly">📆 每周（指定日）</option>
+                    <option value="monthly">🗓️ 每月</option>
+                </select>
+            </div>
+            <!-- Day picker for weekly recurrence -->
+            <div x-show="taskForm.recurrence && taskForm.recurrence.startsWith('weekly')" style="margin-bottom:14px;">
+                <label class="form-label">选择星期</label>
+                <div class="chip-group">
+                    <template x-for="(label, idx) in ['周一','周二','周三','周四','周五','周六','周日']" :key="idx">
+                        <span class="chip"
+                              :class="{ active: weekDays[idx] }"
+                              @click="weekDays[idx] = !weekDays[idx]; updateWeekDays()"
+                              x-text="label"></span>
+                    </template>
+                </div>
+            </div>
+        </div>
+        <div class="sheet-footer">
+            <button class="btn btn-danger" x-show="editingTask" @click="deleteTask(editingTask.id)">删除</button>
+            <button class="btn btn-secondary" @click="closeTaskModal()">取消</button>
+            <button class="btn btn-primary" @click="saveTask()" :disabled="!taskForm.title">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- App JS -->
+<script src="/js/api.js?v=2"></script>
+<script src="/js/notifications.js?v=2"></script>
+<script src="/js/lunar.js?v=2"></script>
+<script src="/js/weather.js?v=2"></script>
+<script src="/js/calendar_v2.js"></script>
+
+<script src="/js/app_v2.js"></script>
+
+<script>
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js');
+}
+</script>
+<!-- Hidden file inputs -->
+<input type="file" x-ref="iconInput" accept="image/*"
+       style="position:absolute;width:0;height:0;opacity:0;pointer-events:none;"
+       @change="uploadIcon($event)">
+<input type="file" id="petInput" accept="image/*"
+       style="position:absolute;width:0;height:0;opacity:0;pointer-events:none;"
+       @change="uploadPet($event)">
+<style>
+</style>
+
+<script>
+
+</body>
+</html>
